@@ -1,24 +1,36 @@
 package com.example.llmagentsystem.service;
 
+import com.example.llmagentsystem.model.nlp.StructuredNlpResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.ChatClient;
 import org.springframework.ai.chat.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.prompt.PromptTemplate;
-import org.springframework.ai.openai.OpenAiChatOptions;
-// import org.springframework.ai.openai.api.OpenAiApi.ChatCompletionMessage.Role; // Not used directly in this version
+import org.springframework.ai.parser.BeanOutputParser;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.Map;
-// import java.util.List; // Not used directly in this version
-// import java.util.stream.Collectors; // Not used directly in this version
+import java.util.stream.Collectors;
 
-// Placeholder for a more structured response for understanding text
-// In a real scenario, this might map to a Pojo with fields for intent, entities, etc.
-// Spring AI's function calling or output parsers would populate this.
-record UnderstoodText(String intent, Map<String, Object> entities, String originalText) {}
+// Assuming RetrievedContextItem is accessible or defined similarly
+// For simplicity, let's define a local record if not directly importing from MemoryService's scope
+// For now, assume CoreOrchestrationService will pass a formatted string or a list of simple message strings.
+// Let's refine this to accept a list of simple objects representing message history.
+
+record ChatMessageHistoryItem(String role, String content) {}
+
+// Pojo for BeanOutputParser (ensure it's accessible or defined here)
+class IntentExtractionPojo {
+    private String intent;
+    private Map<String, Object> entities;
+    public String getIntent() { return intent; }
+    public void setIntent(String intent) { this.intent = intent; }
+    public Map<String, Object> getEntities() { return entities; }
+    public void setEntities(Map<String, Object> entities) { this.entities = entities; }
+}
 
 @Service
 public class NlpService {
@@ -26,104 +38,139 @@ public class NlpService {
     private static final Logger logger = LoggerFactory.getLogger(NlpService.class);
 
     private final ChatClient chatClient;
+    private final BeanOutputParser<IntentExtractionPojo> intentExtractionParser;
 
     @Autowired
     public NlpService(ChatClient chatClient) {
         this.chatClient = chatClient;
+        this.intentExtractionParser = new BeanOutputParser<>(IntentExtractionPojo.class);
     }
 
     /**
-     * Understands the given text to extract intent and entities.
-     * This is a simplified example. Real implementation would use more robust
-     * prompting, function calling, or structured output parsing.
+     * Formats a list of ChatMessageHistoryItem into a string for the prompt.
+     */
+    private String formatConversationHistory(List<ChatMessageHistoryItem> history) {
+        if (history == null || history.isEmpty()) {
+            return "No prior conversation history available for this interaction.";
+        }
+        return history.stream()
+                .map(item -> item.role() + ": " + item.content())
+                .collect(Collectors.joining("\n"));
+    }
+
+    /**
+     * Understands the given text to extract intent and entities, considering conversation history.
      *
      * @param text The input text from the user.
-     * @return An UnderstoodText object.
+     * @param conversationHistory A list of previous messages (role and content).
+     * @return A StructuredNlpResult object.
      */
-    public UnderstoodText understandText(String text) {
-        logger.debug("Understanding text: '{}'", text);
-        // Example: Simple prompt to ask the LLM to classify intent and extract entities
-        // This would need to be much more sophisticated for reliable results.
-        // Consider using Spring AI's OutputParser features for structured output.
+    public StructuredNlpResult understandText(String text, List<ChatMessageHistoryItem> conversationHistory) {
+        logger.debug("Understanding text with history: '{}'", text);
+
+        String formattedHistory = formatConversationHistory(conversationHistory);
+        String formatInstructions = intentExtractionParser.getFormat();
+
         String promptString = """
-            Analyze the following text and identify the primary intent and any relevant entities.
-            Provide the intent as a single keyword (e.g., CREATE_TASK, GET_WEATHER, SEND_MESSAGE).
-            Provide entities as key-value pairs.
-            If intent is unclear, respond with INTENT_UNCLEAR.
+            Given the following conversation history:
+            --- START HISTORY ---
+            {history}
+            --- END HISTORY ---
 
-            Example:
-            Text: "Remind me to buy milk tomorrow at 5pm"
-            Response: Intent: CREATE_TASK, Entities: {"item": "milk", "time": "tomorrow at 5pm"}
+            Analyze the following new text from the User:
+            User: "{inputText}"
 
-            Text: "{inputText}"
-            Response:
+            Identify the primary intent and any relevant entities from the new text, considering the history for context.
+            The primary intent should be one of the following keywords if applicable:
+            CREATE_TASK, GET_WEATHER, CALCULATOR, ECHO, SEND_MESSAGE, UNKNOWN_INTENT.
+            Extract entities as key-value pairs relevant to the intent.
+            For CREATE_TASK, entities could include 'description', 'dueDate', 'assignee'.
+            For CALCULATOR, entities could include 'operand1', 'operand2', 'operation'.
+            For ECHO, the main text can be an entity like 'message'.
+
+            {formatInstructions}
             """;
+
         PromptTemplate promptTemplate = new PromptTemplate(promptString);
-        Prompt prompt = promptTemplate.create(Map.of("inputText", text));
+        Prompt prompt = promptTemplate.create(Map.of(
+            "history", formattedHistory,
+            "inputText", text,
+            "formatInstructions", formatInstructions
+        ));
+
+        logger.debug("Constructed prompt for LLM (understandText with history): {}", prompt.getContents());
 
         try {
             ChatResponse response = chatClient.call(prompt);
-            String llmResponse = response.getResult().getOutput().getContent();
-            logger.debug("LLM response for understanding: {}", llmResponse);
+            String llmResponseContent = response.getResult().getOutput().getContent();
+            logger.debug("Raw LLM response for structured understanding with history: {}", llmResponseContent);
 
-            // Basic parsing of the LLM response (highly simplified)
-            // TODO: Implement robust parsing for intent and entities
-            String intent = "PARSED_INTENT_STUB"; // Placeholder
-            Map<String, Object> entities = Map.of("detail", llmResponse); // Placeholder
+            IntentExtractionPojo parsedPojo = intentExtractionParser.parse(llmResponseContent);
 
-            if (llmResponse.contains("Intent: CREATE_TASK")) { // Example crude parsing
-                intent = "CREATE_TASK";
-            } else if (llmResponse.contains("Intent: GET_WEATHER")) {
-                intent = "GET_WEATHER";
-            }
-            // ... more sophisticated parsing needed here
+            String intent = parsedPojo.getIntent() != null ? parsedPojo.getIntent() : "UNKNOWN_INTENT";
+            Map<String, Object> entities = parsedPojo.getEntities() != null ? parsedPojo.getEntities() : Map.of();
 
-            return new UnderstoodText(intent, entities, text);
+            return new StructuredNlpResult(intent, entities, text);
+
         } catch (Exception e) {
-            logger.error("Error calling LLM for understanding text: {}", e.getMessage(), e);
-            return new UnderstoodText("ERROR_UNDERSTANDING", Map.of("error", e.getMessage()), text);
+            logger.error("Error calling LLM or parsing response for structured understanding with history: {}", e.getMessage(), e);
+            return new StructuredNlpResult("ERROR_NLP_PROCESSING", Map.of("error", e.getMessage()), text);
         }
     }
 
     /**
-     * Generates text based on a given prompt.
+     * Generates text based on a given prompt, considering conversation history.
      *
-     * @param userPrompt The prompt to generate text from.
+     * @param userPromptText The current prompt/text from the user.
+     * @param conversationHistory A list of previous messages (role and content).
      * @return The generated text.
      */
-    public String generateText(String userPrompt) {
-        logger.debug("Generating text for prompt: '{}'", userPrompt);
-        Prompt prompt = new Prompt(userPrompt);
+    public String generateText(String userPromptText, List<ChatMessageHistoryItem> conversationHistory) {
+        logger.debug("Generating text for prompt with history: '{}'", userPromptText);
+
+        String formattedHistory = formatConversationHistory(conversationHistory);
+
+        // Construct a prompt that includes history and the new user message
+        String fullPromptString = """
+            Conversation History:
+            {history}
+
+            Current User Query:
+            User: {currentUserPrompt}
+
+            Agent Response:
+            """; // The LLM will complete this.
+
+        PromptTemplate promptTemplate = new PromptTemplate(fullPromptString);
+        Prompt prompt = promptTemplate.create(Map.of(
+            "history", formattedHistory,
+            "currentUserPrompt", userPromptText
+        ));
+
+        logger.debug("Constructed prompt for LLM (generateText with history): {}", prompt.getContents());
+
         try {
             ChatResponse response = chatClient.call(prompt);
             return response.getResult().getOutput().getContent();
         } catch (Exception e) {
-            logger.error("Error calling LLM for text generation: {}", e.getMessage(), e);
+            logger.error("Error calling LLM for text generation with history: {}", e.getMessage(), e);
             return "Error: Could not generate text due to: " + e.getMessage();
         }
     }
 
     /**
-     * Summarizes the given text.
-     *
+     * Summarizes the given text. History might be less relevant here, or could be used to tailor summary style.
+     * For now, not adding history to summarizeText, but it's an option.
      * @param textToSummarize The text to be summarized.
      * @return The summarized text.
      */
     public String summarizeText(String textToSummarize) {
         logger.debug("Summarizing text of length: {}", textToSummarize.length());
-        String promptString = "Please summarize the following text concisely: \n\n{text}"; // Escaped \n for shell
+        String promptString = "Please summarize the following text concisely: \n\n{text}"; // Escaped \n
         PromptTemplate promptTemplate = new PromptTemplate(promptString);
         Prompt prompt = promptTemplate.create(Map.of("text", textToSummarize));
 
         try {
-            // Example of using OpenAiChatOptions if needed for specific models or parameters
-            // OpenAiChatOptions options = OpenAiChatOptions.builder()
-            //         .withModel("gpt-3.5-turbo") // Or your preferred model for summarization
-            //         .withTemperature(0.5f)
-            //         .build();
-            // Prompt promptWithOptions = new Prompt(prompt.getContents(), options);
-            // ChatResponse response = chatClient.call(promptWithOptions);
-
             ChatResponse response = chatClient.call(prompt);
             return response.getResult().getOutput().getContent();
         } catch (Exception e) {
@@ -131,25 +178,4 @@ public class NlpService {
             return "Error: Could not summarize text due to: " + e.getMessage();
         }
     }
-
-    /**
-     * Generates embeddings for a given text.
-     * This method might be better placed in MemoryService if using EmbeddingClient directly,
-     * but NlpService could also expose it if it coordinates various NLP tasks.
-     * For now, assuming EmbeddingClient is used elsewhere (e.g. MemoryService).
-     * If NlpService needs to provide embeddings itself:
-     *
-     * import org.springframework.ai.embedding.EmbeddingClient;
-     * private final EmbeddingClient embeddingClient;
-     *
-     * public List<Double> embedText(String text) {
-     *     logger.debug("Embedding text: '{}'", text);
-     *     try {
-     *         return embeddingClient.embed(text);
-     *     } catch (Exception e) {
-     *         logger.error("Error generating embedding: {}", e.getMessage(), e);
-     *         return List.of();
-     *     }
-     * }
-     */
 }

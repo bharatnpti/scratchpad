@@ -1,0 +1,289 @@
+Key changes to CoreOrchestrationService.java:
+
+1.  **Import `ChatMessageHistoryItem` from `NlpService` (or make it a shared model).**
+    Assuming `ChatMessageHistoryItem` is defined within `NlpService` or accessible. If not, it needs to be defined in a shared location. For this example, we'll assume it's accessible.
+
+2.  **In `processIncomingText` method, before calling `nlpService.understandText`:**
+    *   Fetch recent message history for the current conversation. This can be done using `MessageRepository` or by adding a new method to `MemoryService` that returns messages in a simpler format suitable for `ChatMessageHistoryItem`.
+    *   Transform these messages into a `List<ChatMessageHistoryItem>`.
+
+    ```java
+    // Inside processIncomingText method, before nlpService.understandText call:
+
+    // Fetch recent history (e.g., last 5 messages)
+    // This is a simplified example. A more robust solution would consider token limits
+    // and potentially use a dedicated method in MemoryService to fetch history formatted for NLP.
+    List<MessageEntity> recentMessages = messageRepository
+        .findByConversationConversationIdOrderByTimestampDesc(conversation.getConversationId())
+        .stream()
+        .limit(5) // Limit history to last 5 messages for brevity in prompt
+        .collect(Collectors.toList());
+    Collections.reverse(recentMessages); // Ensure chronological order for the prompt (oldest first)
+
+    List<NlpService.ChatMessageHistoryItem> chatHistory = recentMessages.stream()
+        .map(msg -> new NlpService.ChatMessageHistoryItem(
+                msg.getRole().name(), // Assuming NlpService.ChatMessageHistoryItem has role, content
+                msg.getContent()))
+        .collect(Collectors.toList());
+
+    logger.debug("Formatted chat history for NLP: {}", chatHistory);
+
+    // Call NlpService with history
+    StructuredNlpResult nlpResult = nlpService.understandText(textInput, chatHistory);
+    ```
+
+3.  **Update `CoreOrchestrationService`'s call to `nlpService.generateText` if it's used for default responses:**
+    *   If the default response generation also needs context, pass `chatHistory` to it as well.
+    *   The current default path in `CoreOrchestrationService` for unhandled intents does not call `nlpService.generateText` but crafts a simpler response. If it were to call `nlpService.generateText`, it would now be:
+      `agentResponseText = nlpService.generateText("Respond to the user's message: " + textInput, chatHistory);`
+
+**Full conceptual change in `CoreOrchestrationService.java`:**
+
+```java
+package com.example.llmagentsystem.service;
+
+import com.example.llmagentsystem.model.entity.ConversationEntity;
+import com.example.llmagentsystem.model.entity.MessageEntity;
+import com.example.llmagentsystem.model.entity.UserEntity;
+import com.example.llmagentsystem.model.enums.UserRole;
+import com.example.llmagentsystem.model.nlp.StructuredNlpResult;
+// Assuming ChatMessageHistoryItem is accessible via NlpService or a shared model
+// For this example, let's say NlpService exposes it or it's moved to a common model package
+// import com.example.llmagentsystem.service.NlpService.ChatMessageHistoryItem; // If inner record
+import com.example.llmagentsystem.repository.ConversationRepository;
+import com.example.llmagentsystem.repository.MessageRepository;
+import com.example.llmagentsystem.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.OffsetDateTime;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+
+@Service
+public class CoreOrchestrationService {
+
+    private static final Logger logger = LoggerFactory.getLogger(CoreOrchestrationService.class);
+
+    private final NlpService nlpService;
+    private final MemoryService memoryService;
+    private final TaskService taskService;
+    private final ActionExecutorService actionExecutorService;
+    private final UserRepository userRepository;
+    private final ConversationRepository conversationRepository;
+    private final MessageRepository messageRepository;
+
+    @Autowired
+    public CoreOrchestrationService(
+            NlpService nlpService,
+            MemoryService memoryService,
+            TaskService taskService,
+            ActionExecutorService actionExecutorService,
+            UserRepository userRepository,
+            ConversationRepository conversationRepository,
+            MessageRepository messageRepository) {
+        this.nlpService = nlpService;
+        this.memoryService = memoryService;
+        this.taskService = taskService;
+        this.actionExecutorService = actionExecutorService;
+        this.userRepository = userRepository;
+        this.conversationRepository = conversationRepository;
+        this.messageRepository = messageRepository;
+    }
+
+    @Transactional
+    public String processIncomingText(String textInput, String userPlatformId, String conversationPlatformId, String sourcePlatform) {
+        logger.info("Processing text input: '{}' from user {} in conversation {} on platform {}",
+                textInput, userPlatformId, conversationPlatformId, sourcePlatform);
+
+        UserEntity user = getOrCreateUser(userPlatformId, sourcePlatform);
+        ConversationEntity conversation = getOrCreateConversation(conversationPlatformId, sourcePlatform, user);
+        conversation.setLastActivityTimestamp(OffsetDateTime.now());
+        conversationRepository.save(conversation);
+
+        MessageEntity userMessage = new MessageEntity();
+        userMessage.setContent(textInput);
+        userMessage.setConversation(conversation);
+        userMessage.setUser(user);
+        userMessage.setRole(UserRole.USER);
+        userMessage.setTimestamp(OffsetDateTime.now());
+        userMessage.setPlatformMessageId("simulated_platform_msg_id_" + UUID.randomUUID());
+        MessageEntity savedUserMessage = messageRepository.save(userMessage);
+        memoryService.storeMessageMemory(savedUserMessage);
+
+        // --- MODIFICATION START: Fetch and prepare conversation history ---
+        // Fetch recent history (e.g., last 5 messages, excluding current one)
+        // Note: PageRequest is 0-indexed.
+        List<MessageEntity> recentDbMessages = messageRepository.findByConversationConversationIdOrderByTimestampDesc(
+            conversation.getConversationId(),
+            PageRequest.of(0, 6, Sort.by("timestamp").descending()) // Fetch current + last 5
+        ).stream()
+         .filter(m -> !m.getMessageId().equals(savedUserMessage.getMessageId())) // Exclude the current message
+         .limit(5)
+         .collect(Collectors.toList());
+        Collections.reverse(recentDbMessages); // Ensure chronological order (oldest first)
+
+        List<NlpService.ChatMessageHistoryItem> chatHistory = recentDbMessages.stream()
+            .map(msg -> new NlpService.ChatMessageHistoryItem( // Assuming ChatMessageHistoryItem is an inner record of NlpService
+                    msg.getRole().name(),
+                    msg.getContent()))
+            .collect(Collectors.toList());
+
+        logger.debug("Formatted chat history for NLP ({} items): {}", chatHistory.size(), chatHistory);
+        // --- MODIFICATION END ---
+
+        StructuredNlpResult nlpResult = nlpService.understandText(textInput, chatHistory); // Pass history
+        logger.debug("Structured NLP Result - Intent: {}, Entities: {}", nlpResult.intent(), nlpResult.entities());
+
+        String agentResponseText = "I'm not sure how to respond to that.";
+
+        try {
+            switch (nlpResult.intent().toUpperCase()) {
+                case "CREATE_TASK":
+                    String description = (String) nlpResult.entities().getOrDefault("description",
+                        nlpResult.entities().getOrDefault("detail", "Task from: " + textInput));
+                    taskService.createTask(description, user, null, null, null, conversation, null);
+                    agentResponseText = "Okay, I've created a task for you: " + description;
+                    break;
+
+                case "GET_WEATHER":
+                case "CALCULATOR":
+                case "ECHO":
+                    String pluginName = nlpResult.intent().toLowerCase();
+                    Map<String, Object> params = new HashMap<>(nlpResult.entities());
+                    if ("calculator".equalsIgnoreCase(pluginName)) {
+                        try {
+                            Object op1 = params.get("operand1");
+                            Object op2 = params.get("operand2");
+                            params.computeIfPresent("operand1", (k, v) -> Double.parseDouble(String.valueOf(op1)));
+                            params.computeIfPresent("operand2", (k, v) -> Double.parseDouble(String.valueOf(op2)));
+                        } catch (NumberFormatException e) {
+                            logger.warn("Could not parse calculator operands from entities: {}", nlpResult.entities());
+                            throw new IllegalArgumentException("Calculator operands must be numbers.", e);
+                        }
+                    }
+                    Map<String, Object> actionResult = actionExecutorService.executeAction(pluginName, params, null);
+                    agentResponseText = "Action '" + pluginName + "' executed. Result: " + actionResult.toString();
+                    if ("echo".equalsIgnoreCase(pluginName)) {
+                         agentResponseText = actionResult.getOrDefault("echo_message", "Echo failed.").toString();
+                    }
+                    break;
+
+                case "ERROR_NLP_PROCESSING":
+                    agentResponseText = "I had trouble understanding your request due to an internal NLP processing error.";
+                    logger.error("NLP processing error encountered: {}", nlpResult.entities().get("error"));
+                    break;
+
+                case "UNKNOWN_INTENT":
+                    agentResponseText = "I'm not quite sure what you mean by that. Could you try rephrasing or being more specific?";
+                    break;
+
+                default:
+                    logger.info("Unhandled intent '{}', attempting generic response with history for: {}", nlpResult.intent(), textInput);
+                    // Now pass history to generateText as well if this path is taken
+                    agentResponseText = nlpService.generateText(textInput, chatHistory);
+                    // Fallback if generateText returns an error message or is too generic
+                    if (agentResponseText.startsWith("Error:")) {
+                         agentResponseText = "Thanks for your message: '" + textInput + "'. I'm still learning how to handle this specific request.";
+                    }
+                    break;
+            }
+        } catch (IllegalArgumentException e) {
+            logger.warn("Invalid argument during processing intent {}: {}", nlpResult.intent(), e.getMessage());
+            agentResponseText = "There was an issue with the parameters for your request: " + e.getMessage();
+        } catch (Exception e) {
+            logger.error("Error processing intent {}: {}", nlpResult.intent(), e.getMessage(), e);
+            agentResponseText = "I encountered an error trying to process your request. Please try again.";
+        }
+
+        MessageEntity agentMessage = new MessageEntity();
+        agentMessage.setContent(agentResponseText);
+        agentMessage.setConversation(conversation);
+        agentMessage.setUser(getAgentUser());
+        agentMessage.setRole(UserRole.AGENT);
+        agentMessage.setTimestamp(OffsetDateTime.now());
+        MessageEntity savedAgentMessage = messageRepository.save(agentMessage);
+        memoryService.storeMessageMemory(savedAgentMessage);
+
+        return agentResponseText;
+    }
+
+    private UserEntity getOrCreateUser(String platformId, String sourcePlatform) {
+        return userRepository.findByPlatformIdAndSourcePlatform(platformId, sourcePlatform)
+                .orElseGet(() -> {
+                    UserEntity newUser = new UserEntity();
+                    newUser.setPlatformId(platformId);
+                    newUser.setSourcePlatform(sourcePlatform);
+                    newUser.setDisplayName("User " + platformId);
+                    logger.info("Creating new user for platformId: {} on platform: {}", platformId, sourcePlatform);
+                    return userRepository.save(newUser);
+                });
+    }
+
+    private ConversationEntity getOrCreateConversation(String platformId, String sourcePlatform, UserEntity user) {
+        return conversationRepository.findByPlatformConversationIdAndSourcePlatform(platformId, sourcePlatform)
+                .orElseGet(() -> {
+                    ConversationEntity newConversation = new ConversationEntity();
+                    newConversation.setPlatformConversationId(platformId);
+                    newConversation.setSourcePlatform(sourcePlatform);
+                    newConversation.setType("direct_message");
+                    logger.info("Creating new conversation for platformId: {} on platform: {}", platformId, sourcePlatform);
+                    return conversationRepository.save(newConversation);
+                });
+    }
+
+    private UserEntity getAgentUser() {
+        final String AGENT_PLATFORM_ID = "SYSTEM_AGENT";
+        final String AGENT_SOURCE_PLATFORM = "INTERNAL";
+        return userRepository.findByPlatformIdAndSourcePlatform(AGENT_PLATFORM_ID, AGENT_SOURCE_PLATFORM)
+            .orElseGet(() -> {
+                UserEntity agentUser = new UserEntity();
+                agentUser.setPlatformId(AGENT_PLATFORM_ID);
+                agentUser.setSourcePlatform(AGENT_SOURCE_PLATFORM);
+                agentUser.setDisplayName("AI Agent");
+                agentUser.setEmail("agent@system.internal");
+                logger.info("Creating system agent user.");
+                return userRepository.save(agentUser);
+            });
+    }
+}
+
+```
+
+**Important Considerations for the actual update:**
+1.  **`ChatMessageHistoryItem` Accessibility:** The `NlpService.ChatMessageHistoryItem` record must be accessible to `CoreOrchestrationService`. If it's a private inner record, it needs to be made public or moved to a shared model package (e.g., `com.example.llmagentsystem.model.nlp`).
+2.  **`MessageRepository` Method:** The `MessageRepository` needs a method to fetch messages with pagination/limiting and sorted by timestamp. The example uses `findByConversationConversationIdOrderByTimestampDesc(UUID conversationId, Pageable pageable)`. This needs to be added to the `MessageRepository` interface.
+
+    ```java
+    // In MessageRepository.java
+    import org.springframework.data.domain.Pageable;
+    import java.util.List;
+
+    // ...
+    List<MessageEntity> findByConversationConversationIdOrderByTimestampDesc(UUID conversationId, Pageable pageable);
+    ```
+
+This plan outlines the necessary modifications. I will now apply these changes to `CoreOrchestrationService.java` and create the necessary update for `MessageRepository.java`.The previous step updated `NlpService` and its tests to handle conversation history. Now, I need to update `CoreOrchestrationService` to fetch this history and pass it to `NlpService`. I also need to ensure `MessageRepository` has the method to fetch recent messages.
+
+**Plan:**
+1.  **Modify `MessageRepository.java`**: Add the method `List<MessageEntity> findByConversationConversationIdOrderByTimestampDesc(UUID conversationId, Pageable pageable);` to support fetching recent messages with pagination.
+2.  **Modify `CoreOrchestrationService.java`**:
+    *   Import necessary classes (`PageRequest`, `Sort`, `Collections`, `Collectors`, `NlpService.ChatMessageHistoryItem`).
+    *   In the `processIncomingText` method:
+        *   Before calling `nlpService.understandText`, fetch the last 5 messages (excluding the current one) for the given conversation using the new repository method.
+        *   Transform these `MessageEntity` objects into a `List<NlpService.ChatMessageHistoryItem>`.
+        *   Pass this `chatHistory` list to `nlpService.understandText(textInput, chatHistory)`.
+        *   If the default case for unhandled intents is reached and it calls `nlpService.generateText`, pass the `chatHistory` to this call as well.
+3.  For the purpose of this automated step, I will assume `NlpService.ChatMessageHistoryItem` is accessible (e.g., it's a public inner record or moved to a shared package). The script for the previous step defined it as a package-private record within `NlpService.java`. For `CoreOrchestrationService` to use it directly as `NlpService.ChatMessageHistoryItem`, it would need to be public. I'll proceed with this assumption for the script. If it were private, a shared DTO would be better.
+
+Let's start by updating `MessageRepository.java`.

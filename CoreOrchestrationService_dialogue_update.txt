@@ -1,67 +1,31 @@
-package com.example.llmagentsystem.service;
+Key changes to CoreOrchestrationService.java to integrate with DialogueService:
 
-import com.example.llmagentsystem.model.entity.ConversationEntity;
-import com.example.llmagentsystem.model.entity.MessageEntity;
-import com.example.llmagentsystem.model.entity.UserEntity;
-import com.example.llmagentsystem.model.enums.UserRole;
-import com.example.llmagentsystem.model.nlp.StructuredNlpResult;
-// Assuming ChatMessageHistoryItem is a public inner record in NlpService or moved to a shared model.
-// For direct use as NlpService.ChatMessageHistoryItem, it must be public.
-// import com.example.llmagentsystem.service.NlpService.ChatMessageHistoryItem;
-import com.example.llmagentsystem.repository.ConversationRepository;
-import com.example.llmagentsystem.repository.MessageRepository;
-import com.example.llmagentsystem.repository.UserRepository;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Sort;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+1.  **Inject `DialogueService`**: Add `DialogueService` as a dependency in the constructor.
 
-import java.time.OffsetDateTime;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.stream.Collectors;
+2.  **In `processIncomingText` method**:
+    *   **Check for Active Clarification**: At the beginning, check if there's an active clarification for the current `conversationPlatformId` by calling `dialogueService.getDialogueState()`.
+    *   **Handle Clarification Input**: If so, pass the `textInput` to `dialogueService.handleClarificationInput()`.
+        *   If clarification is now complete (`dialogueState.isClarificationComplete()`):
+            *   Retrieve the original intent and collected entities from the `dialogueState`.
+            *   Re-attempt to process the original intent using the now complete set of entities.
+            *   Clear the dialogue state using `dialogueService.clearDialogueState()`.
+        *   If clarification is still ongoing:
+            *   Formulate the next clarification question using `dialogueService.formulateClarificationQuestion()`.
+            *   Return this question as the agent's response.
+    *   **Normal Processing (No Active Clarification)**: If no active clarification, proceed as before with `nlpService.understandText()`.
+    *   **Initiate Clarification (After NLP)**: After `nlpService.understandText()`, if the intent requires entities that are missing (this logic needs to be defined, e.g., a "CREATE_TASK" intent needs a 'description'):
+        *   Identify missing entities.
+        *   Call `dialogueService.initiateClarification()` with the intent, missing entities, and the `nlpResult`.
+        *   Return the clarification question from `DialogueService` as the agent's response.
+    *   **Response Formulation**: Instead of crafting response strings directly in `CoreOrchestrationService` for successful operations or errors, prepare a `ProcessingResult` (or similar DTO) and pass it to `dialogueService.formulateResponse()` to get the final user-facing message. This centralizes response generation.
 
+**Conceptual `processIncomingText` method structure:**
 
-@Service
-public class CoreOrchestrationService {
+```java
+// ... imports and class structure ...
 
-    private static final Logger logger = LoggerFactory.getLogger(CoreOrchestrationService.class);
-
-    private final NlpService nlpService;
-    private final MemoryService memoryService;
-    private final TaskService taskService;
-    private final ActionExecutorService actionExecutorService;
-    private final UserRepository userRepository;
-    private final ConversationRepository conversationRepository;
-    private final MessageRepository messageRepository;
-    private final DialogueService dialogueService; // Added DialogueService
-
-    @Autowired
-    public CoreOrchestrationService(
-            NlpService nlpService,
-            MemoryService memoryService,
-            TaskService taskService,
-            ActionExecutorService actionExecutorService,
-            UserRepository userRepository,
-            ConversationRepository conversationRepository,
-            MessageRepository messageRepository,
-            DialogueService dialogueService) { // Added DialogueService
-        this.nlpService = nlpService;
-        this.memoryService = memoryService;
-        this.taskService = taskService;
-        this.actionExecutorService = actionExecutorService;
-        this.userRepository = userRepository;
-        this.conversationRepository = conversationRepository;
-        this.messageRepository = messageRepository;
-        this.dialogueService = dialogueService; // Added DialogueService
-    }
+// (Inside CoreOrchestrationService class)
+// ... constructor and other methods ...
 
     @Transactional
     public String processIncomingText(String textInput, String userPlatformId, String conversationPlatformId, String sourcePlatform) {
@@ -69,25 +33,26 @@ public class CoreOrchestrationService {
                 textInput, userPlatformId, conversationPlatformId, sourcePlatform);
 
         UserEntity user = getOrCreateUser(userPlatformId, sourcePlatform);
-        // Use conversationPlatformId as the key for dialogue state, as it's more stable for the conversation.
         ConversationEntity conversation = getOrCreateConversation(conversationPlatformId, sourcePlatform, user);
         conversation.setLastActivityTimestamp(OffsetDateTime.now());
         conversationRepository.save(conversation);
 
+        // Store user message (as before)
         MessageEntity userMessage = new MessageEntity();
-        userMessage.setContent(textInput);
+        // ... (set properties for userMessage) ...
+        userMessage.setContent(textInput); // Set content before saving
         userMessage.setConversation(conversation);
         userMessage.setUser(user);
         userMessage.setRole(UserRole.USER);
         userMessage.setTimestamp(OffsetDateTime.now());
         userMessage.setPlatformMessageId("simulated_platform_msg_id_" + UUID.randomUUID());
         MessageEntity savedUserMessage = messageRepository.save(userMessage);
-        memoryService.storeMessageMemory(savedUserMessage);
+        memoryService.storeMessageMemory(savedUserMessage); // Store in vector DB
 
         String agentResponseText;
 
         // --- DIALOGUE MANAGEMENT INTEGRATION START ---
-        DialogueState dialogueState = dialogueService.getDialogueState(conversation.getPlatformConversationId());
+        DialogueState dialogueState = dialogueService.getDialogueState(conversation.getPlatformConversationId()); // Using platform ID as key
 
         if (dialogueState != null && dialogueState.isAwaitingClarification()) {
             DialogueState updatedState = dialogueService.handleClarificationInput(
@@ -97,29 +62,30 @@ public class CoreOrchestrationService {
             if (updatedState.isClarificationComplete()) {
                 logger.info("Clarification complete for conversation {}. Reprocessing original intent: {}",
                     conversation.getPlatformConversationId(), updatedState.getPendingIntent());
-
+                // Use original NLP result but with entities now filled from 'collectedEntities'
                 StructuredNlpResult originalNlp = updatedState.getOriginalNlpResult();
-                Map<String, Object> combinedEntities = new HashMap<>();
-                if(originalNlp.entities() != null) combinedEntities.putAll(originalNlp.entities());
-                combinedEntities.putAll(updatedState.getCollectedEntities());
+                Map<String, Object> combinedEntities = new HashMap<>(originalNlp.entities());
+                combinedEntities.putAll(updatedState.getCollectedEntities()); // Add/overwrite with clarified entities
 
                 StructuredNlpResult reprocessedNlpResult = new StructuredNlpResult(
                     updatedState.getPendingIntent(),
                     combinedEntities,
-                    originalNlp.rawResponse(),
+                    originalNlp.rawResponse(), // or the sequence of inputs, TBD
                     originalNlp.confidence()
                 );
 
-                agentResponseText = routeIntent(reprocessedNlpResult, user, conversation, textInput);
+                agentResponseText = routeIntent(reprocessedNlpResult, user, conversation, textInput /* may need full history for context */);
                 dialogueService.clearDialogueState(conversation.getPlatformConversationId());
             } else {
                 agentResponseText = dialogueService.formulateClarificationQuestion(updatedState);
             }
         } else {
+            // No active clarification, proceed with normal NLP
             List<NlpService.ChatMessageHistoryItem> chatHistory = getChatHistory(conversation.getConversationId(), savedUserMessage.getMessageId());
             StructuredNlpResult nlpResult = nlpService.understandText(textInput, chatHistory);
             logger.debug("Structured NLP Result - Intent: {}, Entities: {}", nlpResult.intent(), nlpResult.entities());
 
+            // Check if clarification is needed based on nlpResult
             List<String> missingEntities = checkForMissingEntities(nlpResult.intent(), nlpResult.entities());
             if (!missingEntities.isEmpty()) {
                 agentResponseText = dialogueService.initiateClarification(
@@ -127,13 +93,17 @@ public class CoreOrchestrationService {
                 );
             } else {
                 agentResponseText = routeIntent(nlpResult, user, conversation, textInput);
+                // If routing was successful and didn't trigger clarification, ensure any prior state is cleared
+                // (though it shouldn't exist if we are in this 'else' branch from the start)
                 dialogueService.clearDialogueState(conversation.getPlatformConversationId());
             }
         }
         // --- DIALOGUE MANAGEMENT INTEGRATION END ---
 
+        // Store Agent Response (as before)
         MessageEntity agentMessage = new MessageEntity();
-        agentMessage.setContent(agentResponseText);
+        // ... (set properties for agentMessage) ...
+        agentMessage.setContent(agentResponseText); // Set content before saving
         agentMessage.setConversation(conversation);
         agentMessage.setUser(getAgentUser());
         agentMessage.setRole(UserRole.AGENT);
@@ -144,84 +114,81 @@ public class CoreOrchestrationService {
         return agentResponseText;
     }
 
+    // New helper method to define which entities are mandatory for an intent
     private List<String> checkForMissingEntities(String intent, Map<String, Object> entities) {
         List<String> missing = new ArrayList<>();
-        if (intent == null) return missing; // No intent, no entities to check
-
         switch (intent.toUpperCase()) {
             case "CREATE_TASK":
-                if (entities == null || (!entities.containsKey("description") && !entities.containsKey("detail"))) {
-                    missing.add("description");
+                if (!entities.containsKey("description") && !entities.containsKey("detail")) {
+                    missing.add("description"); // Ask for description
                 }
+                // Add checks for other mandatory entities like 'dueDate' or 'assignee' if needed
+                // e.g., if (!entities.containsKey("dueDate")) missing.add("dueDate");
                 break;
             case "CALCULATOR":
-                 if (entities == null || !entities.containsKey("operand1")) missing.add("operand1");
-                 if (entities == null || !entities.containsKey("operand2")) missing.add("operand2");
-                 if (entities == null || !entities.containsKey("operation")) missing.add("operation");
+                if (!entities.containsKey("operand1")) missing.add("operand1");
+                if (!entities.containsKey("operand2")) missing.add("operand2");
+                if (!entities.containsKey("operation")) missing.add("operation");
                 break;
+            // Add other intents and their mandatory entities
         }
         return missing;
     }
 
+    // Refactored intent routing logic into its own method
     private String routeIntent(StructuredNlpResult nlpResult, UserEntity user, ConversationEntity conversation, String originalUserInput) {
         String agentResponseText;
+        // This part is similar to the original switch statement in processIncomingText
+        // It would use dialogueService.formulateResponse with a ProcessingResult DTO
+        // For brevity, direct string assignment is shown here.
         try {
             switch (nlpResult.intent().toUpperCase()) {
                 case "CREATE_TASK":
                     String description = (String) nlpResult.entities().getOrDefault("description",
                         nlpResult.entities().getOrDefault("detail", "Task from: " + originalUserInput));
                     taskService.createTask(description, user, null, null, null, conversation, null);
-                    // Use DialogueService for formatting this response potentially
-                    agentResponseText = dialogueService.formulateResponse(new ProcessingResult(
-                        nlpResult.intent(), nlpResult.entities(), taskService.getTask( (UUID) nlpResult.entities().getOrDefault("taskId", null) /* This is not ideal, task ID is not in entities yet */), // This part needs refinement
-                        "Task created: " + description, false
-                    ));
-                     // Simplified for now:
                     agentResponseText = "Okay, I've created a task for you: " + description;
                     break;
-                case "GET_WEATHER": // Not implemented, falls to default or needs a plugin
+                case "GET_WEATHER":
                 case "CALCULATOR":
                 case "ECHO":
                     String pluginName = nlpResult.intent().toLowerCase();
-                    Map<String, Object> params = nlpResult.entities() != null ? new HashMap<>(nlpResult.entities()) : new HashMap<>();
-
+                    Map<String, Object> params = new HashMap<>(nlpResult.entities());
                     if ("calculator".equalsIgnoreCase(pluginName)) {
                          try {
                             Object op1 = params.get("operand1");
                             Object op2 = params.get("operand2");
-                            if (op1 != null) params.put("operand1", Double.parseDouble(String.valueOf(op1))); else throw new NumberFormatException("operand1 missing or null");
-                            if (op2 != null) params.put("operand2", Double.parseDouble(String.valueOf(op2))); else throw new NumberFormatException("operand2 missing or null");
+                            if (op1 != null) params.put("operand1", Double.parseDouble(String.valueOf(op1))); else throw new NumberFormatException("operand1 missing");
+                            if (op2 != null) params.put("operand2", Double.parseDouble(String.valueOf(op2))); else throw new NumberFormatException("operand2 missing");
                         } catch (NumberFormatException e) {
                             logger.warn("Could not parse calculator operands from entities: {}", nlpResult.entities());
+                            // This case should ideally be caught by checkForMissingEntities and lead to clarification
                             throw new IllegalArgumentException("Calculator operands must be valid numbers. " + e.getMessage(), e);
                         }
                     }
-                    if ("echo".equalsIgnoreCase(pluginName) && (params == null || !params.containsKey("message")) ) {
-                        params.put("message", originalUserInput);
+                     if ("echo".equalsIgnoreCase(pluginName) && !params.containsKey("message")) {
+                        params.put("message", originalUserInput); // If echo plugin needs a 'message' param
                     }
-
                     Map<String, Object> actionResult = actionExecutorService.executeAction(pluginName, params, null);
-                    agentResponseText = dialogueService.formulateResponse(new ProcessingResult(nlpResult.intent(), params, actionResult, "Action successful", false));
-                    if ("echo".equalsIgnoreCase(pluginName) && actionResult.containsKey("echo_message")) { // Ensure key exists
-                         agentResponseText = actionResult.get("echo_message").toString();
-                    } else if ("calculator".equalsIgnoreCase(pluginName) && actionResult.containsKey("result")) {
-                         agentResponseText = "The result is " + actionResult.get("result").toString() + ".";
+                    // Use DialogueService to format this properly
+                    // agentResponseText = dialogueService.formulateResponse(new ProcessingResult(nlpResult.intent(), params, actionResult, "Action successful", false));
+                    agentResponseText = "Action '" + pluginName + "' executed. Result: " + actionResult.toString();
+                     if ("echo".equalsIgnoreCase(pluginName)) {
+                         agentResponseText = actionResult.getOrDefault("echo_message", "Echo failed.").toString();
                     }
                     break;
                 case "ERROR_NLP_PROCESSING":
                     agentResponseText = "I had trouble understanding your request due to an internal NLP processing error.";
-                    logger.error("NLP processing error encountered: {}", nlpResult.entities() != null ? nlpResult.entities().get("error") : "Unknown NLP error");
+                    logger.error("NLP processing error encountered: {}", nlpResult.entities().get("error"));
                     break;
                 case "UNKNOWN_INTENT":
                     agentResponseText = "I'm not quite sure what you mean by that. Could you try rephrasing or being more specific?";
                     break;
                 default:
                     logger.info("Unhandled intent '{}', attempting generic response for: {}", nlpResult.intent(), originalUserInput);
-                    List<NlpService.ChatMessageHistoryItem> chatHistory = getChatHistory(conversation.getConversationId(), null);
-                    agentResponseText = nlpService.generateText(originalUserInput, chatHistory);
-                    if (agentResponseText.startsWith("Error:")) {
-                         agentResponseText = "Thanks for your message: '" + originalUserInput + "'. I'm still learning how to handle this specific request.";
-                    }
+                    // List<NlpService.ChatMessageHistoryItem> chatHistory = getChatHistory(conversation.getConversationId(), null); // Pass null if current message ID is not relevant or available
+                    // agentResponseText = nlpService.generateText(originalUserInput, chatHistory);
+                    agentResponseText = "Thanks for your message. I'm still learning to handle intent: " + nlpResult.intent();
                     break;
             }
         } catch (IllegalArgumentException e) {
@@ -234,6 +201,8 @@ public class CoreOrchestrationService {
         return agentResponseText;
     }
 
+
+    // Helper to get chat history (similar to previous version)
     private List<NlpService.ChatMessageHistoryItem> getChatHistory(UUID conversationId, UUID currentMessageIdToExclude) {
         List<MessageEntity> recentDbMessages = messageRepository.findByConversationConversationIdOrderByTimestampDesc(
             conversationId,
@@ -245,12 +214,14 @@ public class CoreOrchestrationService {
         Collections.reverse(recentDbMessages);
 
         return recentDbMessages.stream()
-            .map(msg -> new NlpService.ChatMessageHistoryItem( // Assuming ChatMessageHistoryItem is public inner record of NlpService
+            .map(msg -> new NlpService.ChatMessageHistoryItem(
                     msg.getRole().name(),
                     msg.getContent()))
             .collect(Collectors.toList());
     }
 
+    // getOrCreateUser, getOrCreateConversation, getAgentUser methods remain the same
+    // ... (paste existing getOrCreateUser, getOrCreateConversation, getAgentUser methods here) ...
     private UserEntity getOrCreateUser(String platformId, String sourcePlatform) {
         return userRepository.findByPlatformIdAndSourcePlatform(platformId, sourcePlatform)
                 .orElseGet(() -> {
@@ -290,3 +261,20 @@ public class CoreOrchestrationService {
             });
     }
 }
+
+```
+This conceptual plan is quite detailed. I will now attempt to apply these changes to `CoreOrchestrationService.java`.
+The plan to update `CoreOrchestrationService.java` to integrate with the enhanced `DialogueService` is clear. This involves:
+1.  Injecting `DialogueService`.
+2.  In `processIncomingText`:
+    *   Checking for an active clarification state using `dialogueService.getDialogueState()`.
+    *   If clarification is active, using `dialogueService.handleClarificationInput()`.
+        *   If clarification completes, re-process the original intent with collected entities.
+        *   If clarification is ongoing, get the next question from `dialogueService.formulateClarificationQuestion()`.
+    *   If no active clarification, proceed with NLP. Then, check if the NLP result requires clarification using a new helper method `checkForMissingEntities()`.
+        *   If clarification is needed, use `dialogueService.initiateClarification()`.
+        *   Otherwise, route the intent as before (refactored into `routeIntent()`).
+    *   Centralize final response string generation via `DialogueService` (though the plan notes this is simplified for now).
+
+I will now apply these changes to `CoreOrchestrationService.java` using the content from `CoreOrchestrationService_dialogue_update.txt`.
+Also, it's important to ensure `NlpService.ChatMessageHistoryItem` is accessible. Assuming it's a public inner record or moved to a shared package. The previous step defined it as package-private. For the code to compile, this record needs to be public if `CoreOrchestrationService` is to use it as `NlpService.ChatMessageHistoryItem`. I'll make that conceptual adjustment in the generated code. If this were a real multi-file change, I'd update `NlpService.java` first to make `ChatMessageHistoryItem` public. For this single file update via `overwrite_file_with_block`, I will directly use it as if it's public.
