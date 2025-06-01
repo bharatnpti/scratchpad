@@ -1,29 +1,39 @@
 package com.example.llmagentsystem.service;
 
 import com.example.llmagentsystem.model.entity.TaskEntity;
-import com.example.llmagentsystem.model.nlp.StructuredNlpResult;
+import com.example.llmagentsystem.model.nlp.StructuredNlpResult; // Assuming this is the primary NLP output
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
+// NlpService.ChatMessageHistoryItem is needed if DialogueService calls NlpService.generateText
+// For now, let's assume NlpService is available for direct LLM generation if needed.
 
-// Using the ProcessingResult from the previous stub, can be refined.
-// This record is defined in CoreOrchestrationService for now, if needed here, it should be a shared model.
-// For this service's own formulation logic, it might not directly need ProcessingResult if CoreOrchestrationService unpacks it.
-// Let's assume formulateResponse here takes more direct parameters or a dedicated DTO.
-// For now, keeping the old ProcessingResult structure for formulateResponse method signature,
-// but new methods like initiateClarification are more focused.
-record ProcessingResult( // This might be better as a shared DTO if used across services
-    String intent,
-    Map<String, Object> entities,
-    Object executionOutput,
-    String statusMessage,
-    boolean requiresClarification
+// Define a more structured input for formulateResponse
+enum ResponseReason {
+    TASK_CREATED,
+    TASK_UPDATED,
+    TASK_NOT_FOUND,
+    ACTION_EXECUTED,
+    ACTION_FAILED,
+    CLARIFICATION_NEEDED, // For the question itself
+    CLARIFICATION_RECEIVED, // Info that clarification was processed
+    GENERAL_NLP_RESULT, // For direct answers from LLM
+    ERROR_INTERNAL,
+    ERROR_NLP,
+    UNHANDLED_INTENT
+}
+
+record ResponseGenerationContext(
+    ResponseReason reason,
+    String intent, // Original intent
+    Object mainPayload, // e.g., TaskEntity, Map action result, StructuredNlpResult, error message string
+    Map<String, Object> additionalInfo // e.g., original user query, entities
 ) {}
 
 @Service
@@ -31,71 +41,33 @@ public class DialogueService {
 
     private static final Logger logger = LoggerFactory.getLogger(DialogueService.class);
 
-    // In-memory store for active dialogue states. Key: conversationId
-    // For production, this should be moved to a distributed cache (e.g., Redis)
     private final Map<String, DialogueState> activeDialogues = new ConcurrentHashMap<>();
+    private final NlpService nlpService; // For LLM-based response generation
 
-    /**
-     * Handles incoming user text when the conversation might be in a clarification state.
-     * Attempts to use the user's text to satisfy pending clarifications.
-     *
-     * @param conversationId The ID of the current conversation.
-     * @param currentUserInput The user's latest text input.
-     * @param nlpService NlpService to re-analyze input if needed (for entity extraction from clarification).
-     * @return DialogueState if clarification is ongoing or just completed, null otherwise.
-     */
-    public DialogueState handleClarificationInput(String conversationId, String currentUserInput, NlpService nlpService) {
+    @Autowired
+    public DialogueService(NlpService nlpService) {
+        this.nlpService = nlpService;
+    }
+
+    // --- Methods from previous step (State Management & Clarification) ---
+    public DialogueState handleClarificationInput(String conversationId, String currentUserInput, NlpService nlpServiceForClarification) {
         DialogueState state = activeDialogues.get(conversationId);
         if (state != null && state.isAwaitingClarification()) {
             logger.debug("Handling clarification input for conversation {}: '{}'", conversationId, currentUserInput);
-
-            // Attempt to extract the missing entity directly from user input.
-            // This is a simplified approach. A more robust way might involve targeted NLP.
-            String missingEntityName = state.getMissingEntities().get(0); // Assuming we ask one by one
-
-            // For simplicity, let's assume the user's entire input is the value for the missing entity.
-            // A more advanced approach would be to use NLP to extract the specific entity value.
-            // Or, if NlpService can do targeted entity extraction:
-            // StructuredNlpResult clarificationNlp = nlpService.extractEntity(currentUserInput, missingEntityName, state.getPendingIntent());
-            // if (clarificationNlp.entities().containsKey(missingEntityName)) {
-            //    state.addClarifiedEntity(missingEntityName, clarificationNlp.entities().get(missingEntityName));
-            // }
-
-            // Simplified:
+            String missingEntityName = state.getMissingEntities().get(0);
             state.addClarifiedEntity(missingEntityName, currentUserInput);
             logger.info("Added clarified entity '{}' with value '{}' for conversation {}", missingEntityName, currentUserInput, conversationId);
-
-            if (state.isClarificationComplete()) {
-                logger.info("Clarification complete for conversation {}. Pending intent: {}", conversationId, state.getPendingIntent());
-                // State is returned, CoreOrchestrationService will see it's complete and re-process.
-                return state;
-            } else {
-                // Still more entities missing, formulate next clarification question.
-                return state; // Return state so caller can formulate next question
-            }
+            return state; // Return state for CoreOrchestrationService to check if complete
         }
-        return null; // Not in a clarification state or no state found
+        return null;
     }
 
-
-    /**
-     * Initiates a clarification dialogue when required entities are missing.
-     *
-     * @param conversationId The ID of the current conversation.
-     * @param intent The intent that requires clarification.
-     * @param missingEntities A list of names of entities that are missing.
-     * @param originalNlpResult The original NLP result that triggered this.
-     * @return A user-facing question asking for the first missing entity.
-     */
     public String initiateClarification(String conversationId, String intent, List<String> missingEntities, StructuredNlpResult originalNlpResult) {
         if (missingEntities == null || missingEntities.isEmpty()) {
-            logger.warn("InitiateClarification called with no missing entities for intent: {}", intent);
             return "It seems I have everything I need, but something went wrong. Could you try again?";
         }
-
         DialogueState state = activeDialogues.computeIfAbsent(conversationId, DialogueState::new);
-        state.startClarification(intent, new ArrayList<>(missingEntities), originalNlpResult); // Use a mutable list
-
+        state.startClarification(intent, new ArrayList<>(missingEntities), originalNlpResult);
         logger.info("Initiating clarification for conversation {}. Intent: {}, Missing: {}", conversationId, intent, missingEntities);
         return formulateClarificationQuestion(state);
     }
@@ -104,62 +76,15 @@ public class DialogueService {
         if (state == null || !state.isAwaitingClarification() || state.getMissingEntities().isEmpty()) {
             return "I think I have all I need now. Let me process that.";
         }
-        String missingEntity = state.getMissingEntities().get(0); // Ask for the first one
-        // Customize questions based on entity name
+        String missingEntity = state.getMissingEntities().get(0);
         switch (missingEntity.toLowerCase()) {
-            case "duedate":
-            case "date":
-            case "time":
-                return "What date or time should I set for that?";
-            case "assignee":
-            case "person":
-                return "Who should I assign this to?";
-            case "description":
-            case "detail":
-                return "Could you provide more details for that?";
-            case "operand1":
-            case "operand2":
-                return "What is the " + missingEntity.replace("operand", "number ") + "?";
-            case "operation":
-                return "What operation would you like to perform (e.g., add, subtract)?";
-            default:
-                return "I need a bit more information. What about the '" + missingEntity + "'?";
+            case "duedate": case "date": case "time": return "What date or time should I set for that?";
+            case "assignee": case "person": return "Who should I assign this to?";
+            case "description": case "detail": return "Could you provide more details for that?";
+            case "operand1": case "operand2": return "What is the " + missingEntity.replace("operand", "number ") + "?";
+            case "operation": return "What operation would you like to perform (e.g., add, subtract)?";
+            default: return "I need a bit more information. What about the '" + missingEntity + "'?";
         }
-    }
-
-
-    /**
-     * Formulates a response based on the outcome of processing.
-     *
-     * @param processingResult The result from CoreOrchestrationService.
-     * @return A string response to be sent to the user.
-     */
-    public String formulateResponse(ProcessingResult processingResult) {
-        logger.debug("Formulating response for intent: {}, status: {}", processingResult.intent(), processingResult.statusMessage());
-
-        if (processingResult.requiresClarification()) {
-            // This path might be less used if CoreOrchestrationService calls initiateClarification directly
-            return "I need a bit more information. " + processingResult.statusMessage();
-        }
-
-        if (processingResult.executionOutput() instanceof TaskEntity) {
-            TaskEntity task = (TaskEntity) processingResult.executionOutput();
-            return String.format("Okay, I've processed your request regarding task %s. Current status: %s. Description: %s",
-                                 task.getTaskId().toString().substring(0,8),
-                                 task.getStatus(),
-                                 task.getDescription());
-        } else if (processingResult.executionOutput() instanceof Map) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> actionOutput = (Map<String, Object>) processingResult.executionOutput();
-            return "Action '" + processingResult.intent() + "' completed. Result: " + actionOutput.toString();
-        } else if (processingResult.executionOutput() instanceof String) {
-            return (String) processingResult.executionOutput();
-        }
-
-        if (processingResult.statusMessage() != null && !processingResult.statusMessage().isEmpty()) {
-            return processingResult.statusMessage();
-        }
-        return "I've processed your request.";
     }
 
     public DialogueState getDialogueState(String conversationId) {
@@ -170,12 +95,77 @@ public class DialogueService {
         DialogueState state = activeDialogues.get(conversationId);
         if (state != null) {
             state.resetClarification();
-            // Optionally remove if not needed anymore: activeDialogues.remove(conversationId);
-            // Or keep it for other stateful features. For now, just reset.
             logger.info("Dialogue state cleared for conversation {}", conversationId);
         }
     }
+    // --- End of methods from previous step ---
 
+
+    /**
+     * Formulates a user-facing response based on the context of what happened.
+     *
+     * @param context The ResponseGenerationContext providing details about the event.
+     * @param history Optional: conversation history for more contextual LLM responses.
+     * @return A string response to be sent to the user.
+     */
+    public String formulateResponse(ResponseGenerationContext context, List<NlpService.ChatMessageHistoryItem> history) { // Assuming NlpService.ChatMessageHistoryItem
+        logger.debug("Formulating response for reason: {}, intent: {}", context.reason(), context.intent());
+
+        switch (context.reason()) {
+            case TASK_CREATED:
+                TaskEntity createdTask = (TaskEntity) context.mainPayload();
+                return String.format("Okay, I've created task '%s' for you (ID: ...%s).",
+                                     createdTask.getDescription().substring(0, Math.min(createdTask.getDescription().length(), 30)),
+                                     createdTask.getTaskId().toString().substring(Math.max(0, createdTask.getTaskId().toString().length() - 8))); // Last 8 chars for ID
+            case TASK_UPDATED:
+                TaskEntity updatedTask = (TaskEntity) context.mainPayload();
+                return String.format("Task '%s' (ID: ...%s) has been updated. Current status: %s.",
+                                     updatedTask.getDescription().substring(0, Math.min(updatedTask.getDescription().length(), 30)),
+                                     updatedTask.getTaskId().toString().substring(Math.max(0, updatedTask.getTaskId().toString().length() - 8)),
+                                     updatedTask.getStatus());
+            case TASK_NOT_FOUND:
+                return String.format("Sorry, I couldn't find a task with the ID you provided (%s).", context.mainPayload());
+
+            case ACTION_EXECUTED:
+                @SuppressWarnings("unchecked")
+                Map<String, Object> actionOutput = (Map<String, Object>) context.mainPayload();
+                return String.format("Action '%s' executed successfully. Result: %s",
+                                     context.intent() != null ? context.intent().toLowerCase() : "unknown action",
+                                     actionOutput.toString());
+            case ACTION_FAILED:
+                return String.format("Sorry, action '%s' failed. Reason: %s",
+                                     context.intent() != null ? context.intent().toLowerCase() : "unknown action",
+                                     context.mainPayload().toString());
+
+            case CLARIFICATION_NEEDED:
+                return (String) context.mainPayload();
+
+            case CLARIFICATION_RECEIVED:
+                 return "Thanks for the information! Let me try that again.";
+
+            case GENERAL_NLP_RESULT:
+                 StructuredNlpResult nlpResult = (StructuredNlpResult) context.mainPayload();
+                 String potentialAnswer = (String) nlpResult.entities().getOrDefault("answer", "");
+                 if (!potentialAnswer.isEmpty()) return potentialAnswer;
+                 return nlpService.generateText( // Using NlpService from DialogueService
+                    "The user asked: '" + nlpResult.rawResponse() + "'. Based on your understanding (intent: " + nlpResult.intent() + "), provide a concise response.",
+                    history);
+
+            case UNHANDLED_INTENT:
+                String userQuery = (String) context.additionalInfo().getOrDefault("userQuery", "your last message");
+                return nlpService.generateText( // Using NlpService from DialogueService
+                    "I understood your intent as '" + context.intent() + "' for the query '" + userQuery + "', but I don't have a specific way to handle that yet. Try to offer a helpful general response or ask if I can assist with something else.",
+                    history);
+
+            case ERROR_NLP:
+            case ERROR_INTERNAL:
+                return "I'm sorry, I encountered an error: " + context.mainPayload().toString() + ". Please try again.";
+
+            default:
+                logger.warn("Unhandled response reason: {}", context.reason());
+                return "I've processed your request in a way I can't specifically describe right now.";
+        }
+    }
 
     public String directResponse(String message) {
         return message;

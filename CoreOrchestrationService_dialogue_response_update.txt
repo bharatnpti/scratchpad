@@ -1,3 +1,4 @@
+```java
 package com.example.llmagentsystem.service;
 
 import com.example.llmagentsystem.model.entity.ConversationEntity;
@@ -147,7 +148,7 @@ public class CoreOrchestrationService {
 
     private List<String> checkForMissingEntities(String intent, Map<String, Object> entities) {
         List<String> missing = new ArrayList<>();
-        if (intent == null) return missing; // No intent, no entities to check
+        if (intent == null) return missing;
 
         switch (intent.toUpperCase()) {
             case "CREATE_TASK":
@@ -211,7 +212,6 @@ public class CoreOrchestrationService {
                 default: // Any other intent not specifically handled above
                     logger.info("Unhandled intent '{}', attempting generic response for: {}", intent, originalUserInput);
                     // This case might directly use nlpService.generateText or be wrapped in a GENERAL_NLP_RESULT
-                    // For now, let DialogueService handle the LLM call for UNHANDLED_INTENT
                     rgc = new ResponseGenerationContext(ResponseReason.UNHANDLED_INTENT, intent, nlpResult, Map.of("userQuery", originalUserInput));
                     break;
             }
@@ -236,7 +236,7 @@ public class CoreOrchestrationService {
         Collections.reverse(recentDbMessages);
 
         return recentDbMessages.stream()
-            .map(msg -> new NlpService.ChatMessageHistoryItem( // Assuming ChatMessageHistoryItem is public inner record of NlpService
+            .map(msg -> new NlpService.ChatMessageHistoryItem(
                     msg.getRole().name(),
                     msg.getContent()))
             .collect(Collectors.toList());
@@ -281,3 +281,4 @@ public class CoreOrchestrationService {
             });
     }
 }
+```
