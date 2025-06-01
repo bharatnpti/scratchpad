@@ -1,0 +1,86 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.2.0'
+    id 'io.spring.dependency-management' version '1.1.4'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+sourceCompatibility = '17'
+
+repositories {
+    mavenCentral() // Ensure this is attempted first
+    maven { url 'https://repo.spring.io/milestone' }
+    maven { url 'https://repo.spring.io/snapshot' } // Adding snapshot just in case for 0.8.0
+}
+
+ext {
+    set('springAiVersion', "0.8.0")
+}
+
+dependencies {
+    // Spring Boot Starters
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+
+    // Spring AI
+    implementation "org.springframework.ai:spring-ai-openai-spring-boot-starter:${springAiVersion}"
+    implementation "org.springframework.ai:spring-ai-qdrant-vector-store:${springAiVersion}"
+
+    // Database
+    runtimeOnly 'org.postgresql:postgresql'
+    implementation 'org.flywaydb:flyway-core' // Version managed by Spring Boot
+    implementation 'org.flywaydb:flyway-database-postgresql:9.22.3' // Explicitly set version
+
+
+    // Utilities
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+}
+
+dependencyManagement {
+    imports {
+        mavenBom "org.springframework.ai:spring-ai-bom:${springAiVersion}"
+    }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+// Replicate Spring Boot Maven Plugin's exclusion of Lombok
+tasks.withType(org.springframework.boot.gradle.plugin.SpringBootPlugin) {
+    buildInfo() // Ensures buildInfo task is configured if not already
+}
+
+tasks.named('bootJar') {
+    manifest {
+        attributes 'Start-Class': 'com.example.llmagentsystem.LlmAgentSystemApplication' // Assuming this is your main class
+    }
+    // Layered configuration is primarily for Docker image optimization.
+    // Lombok exclusion should be handled by 'compileOnly' and 'annotationProcessor' scopes.
+    // If specific layering is needed later, it can be re-added with correct syntax.
+}
+
+// Basic Checkstyle and Spotless (can be expanded)
+// apply plugin: 'checkstyle'
+// apply plugin: 'com.diffplug.spotless'
+
+// checkstyle {
+//     toolVersion = '10.12.0' // Or your desired version
+//     // config = resources.text.fromFile(rootProject.file('checkstyle.xml')) // If you have a checkstyle.xml
+// }
+
+// spotless {
+//     java {
+//         // Choose your formatter
+//         // googleJavaFormat() // Option 1
+//         // eclipse().configFile(rootProject.file('eclipse-formatter.xml')) // Option 2
+//         // palantirJavaFormat() // Option 3
+//         // prettier().configFile(rootProject.file('.prettierrc.js')) // Option 4
+//         // removeUnusedImports()
+//         // trimTrailingWhitespace()
+//         // endWithNewline()
+//     }
+// }
