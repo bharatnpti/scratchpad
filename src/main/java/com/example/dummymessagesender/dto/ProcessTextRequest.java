@@ -1,4 +1,4 @@
-package com.example.dummymessagesender.dto;
+package java.com.example.dummymessagesender.dto;
 
 import lombok.Getter;
 import lombok.Setter;

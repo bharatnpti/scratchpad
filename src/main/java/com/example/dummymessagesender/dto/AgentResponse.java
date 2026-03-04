@@ -1,12 +1,14 @@
-package com.example.llmagentsystem.controller.dto;
+package java.com.example.dummymessagesender.dto;
 
-import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.AllArgsConstructor;
+import lombok.NoArgsConstructor;
 
 @Getter
 @Setter
 @AllArgsConstructor
+@NoArgsConstructor
 public class AgentResponse {
     private String responseText;
     private String userPlatformId;

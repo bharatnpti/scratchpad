@@ -1,116 +1,49 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.2.0</version> <!-- Use a recent Spring Boot 3 version -->
+        <version>3.2.0</version> <!-- Use a recent stable version -->
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
     <groupId>com.example</groupId>
-    <artifactId>llm-agent-system</artifactId>
+    <artifactId>dummy-message-sender</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <name>llm-agent-system</name>
-    <description>Modular LLM Powered Agent System</description>
-
+    <name>dummy-message-sender</name>
+    <description>Dummy app to send messages for testing LLM Agent System</description>
     <properties>
         <java.version>17</java.version>
-        <spring-ai.version>0.8.0</spring-ai.version> <!-- Check for latest Spring AI version -->
     </properties>
-
     <dependencies>
-        <!-- Spring Boot Starters -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jpa</artifactId>
+            <artifactId>spring-boot-starter</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-
-        <!-- Spring AI -->
-        <dependency>
-            <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-openai-spring-boot-starter</artifactId>
-            <version>${spring-ai.version}</version>
+            <artifactId>spring-boot-starter-json</artifactId>
         </dependency>
         <dependency>
-            <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-qdrant-vector-store</artifactId>
-            <version>${spring-ai.version}</version>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId> <!-- For WebClient -->
         </dependency>
-        <!-- Qdrant Java Client (if spring-ai-qdrant needs specific version or direct use) -->
-        <!-- Check Spring AI docs if this is pulled transitively or needs to be specified -->
-        <!-- For now, assume spring-ai-qdrant-vector-store handles it -->
-        <!-- <dependency>
-            <groupId>io.qdrant</groupId>
-            <artifactId>client</artifactId>
-            <version>1.7.0</version>
-        </dependency> -->
-
-
-        <!-- Database -->
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-core</artifactId>
-        </dependency>
-        <!-- Flyway needs this if you use Spring Boot 3 and want an explicit dependency -->
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-database-postgresql</artifactId>
-        </dependency>
-
-
-        <!-- Utilities -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <optional>true</optional>
         </dependency>
-
     </dependencies>
-
     <build>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
-                    <excludes>
-                        <exclude>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                        </exclude>
-                    </excludes>
+                    <mainClass>com.example.dummymessagesender.DummyMessageSenderApplication</mainClass>
                 </configuration>
             </plugin>
-            <!--
-            Plugins for Checkstyle, Spotless would be added here in a full setup
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-checkstyle-plugin</artifactId>
-                <version>3.3.0</version>
-                <configLocation>checkstyle.xml</configLocation> ...
-            </plugin>
-            <plugin>
-                <groupId>com.diffplug.spotless</groupId>
-                <artifactId>spotless-maven-plugin</artifactId>
-                <version>2.38.0</version> ...
-            </plugin>
-            -->
         </plugins>
     </build>
-
 </project>

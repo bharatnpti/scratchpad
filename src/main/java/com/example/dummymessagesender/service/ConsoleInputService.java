@@ -1,4 +1,4 @@
-package com.example.dummymessagesender.service;
+package java.com.example.dummymessagesender.service;
 
 import com.example.dummymessagesender.dto.ProcessTextRequest;
 import org.springframework.stereotype.Service;

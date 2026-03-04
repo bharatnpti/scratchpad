@@ -1,4 +1,4 @@
-package com.example.dummymessagesender;
+package java.com.example.dummymessagesender;
 
 import com.example.dummymessagesender.dto.ProcessTextRequest;
 import com.example.dummymessagesender.dto.AgentResponse;
